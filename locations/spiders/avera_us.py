@@ -2,6 +2,7 @@ from scrapy import Spider
 
 from locations.dict_parser import DictParser
 from locations.hours import OpeningHours
+from locations.pipelines.address_clean_up import clean_address
 from locations.user_agents import BROWSER_DEFAULT
 
 
@@ -14,15 +15,15 @@ class AveraUSSpider(Spider):
     allowed_domains = ["www.avera.org"]
     start_urls = ["https://www.avera.org/api/locations/all"]
     user_agent = BROWSER_DEFAULT
-    custom_settings = {"ROBOTSTXT_OBEY": False}
+    custom_settings = {"ROBOTSTXT_OBEY": False, "DOWNLOAD_TIMEOUT": 60}
     requires_proxy = "US"
 
     def parse(self, response):
         for location in response.json():
             item = DictParser.parse(location)
             item["ref"] = location["LocationId"]
-            item["street_address"] = ", ".join(
-                filter(None, [location["Address"].get("AddressLine1"), location["Address"].get("AddressLine2")])
+            item["street_address"] = clean_address(
+                [location["Address"].get("AddressLine1"), location["Address"].get("AddressLine2")]
             )
             if "Main" in location["PhoneNumbers"]:
                 item["phone"] = location["PhoneNumbers"]["Main"].get("WholeNumber")

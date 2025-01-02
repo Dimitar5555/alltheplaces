@@ -1,24 +1,20 @@
+from scrapy.http import Response
+from scrapy.spiders import SitemapSpider
+
 from locations.categories import Categories, apply_category
-from locations.storefinders.yext import YextSpider
+from locations.items import Feature
+from locations.structured_data_spider import StructuredDataSpider
 
 
-class IndependentFinancialUSSpider(YextSpider):
+class IndependentFinancialUSSpider(SitemapSpider, StructuredDataSpider):
     name = "independent_financial_us"
     item_attributes = {"brand": "Independent Financial", "brand_wikidata": "Q6016398"}
-    api_key = "ee4600854cf5501c53831bf944472e57"
-    wanted_types = ["location", "atm"]
+    sitemap_urls = ["https://locations.ifinancial.com/sitemap.xml"]
+    sitemap_rules = [(r"https://locations.ifinancial.com/\w+/[a-z-0-9]+/[a-z-0-9]+", "parse_sd")]
 
-    def parse_item(self, item, location):
-        if location["meta"]["entityType"] == "location":
-            apply_category(Categories.BANK, item)
-            item["ref"] = location.get("c_branchCode", location["meta"].get("id"))
-            item["name"] = " ".join(filter(None, [location.get("name"), location.get("geomodifier")]))
-        elif location["meta"]["entityType"] == "atm":
+    def post_process_item(self, item: Feature, response: Response, ld_data: dict, **kwargs):
+        if "/atm" in response.url:
             apply_category(Categories.ATM, item)
-            item["name"] = location.get("geomodifier")
-        item["website"] = location.get("c_pagesURL")
-        item.pop("email", None)
-        item["extras"].pop("contact:instagram", None)
-        item.pop("twitter", None)
-        item.pop("facebook", None)
+        else:
+            apply_category(Categories.BANK, item)
         yield item

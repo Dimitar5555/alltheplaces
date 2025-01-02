@@ -8,6 +8,7 @@ from locations.dict_parser import DictParser
 class PizzaHutNZSpider(Spider):
     name = "pizza_hut_nz"
     item_attributes = {"brand": "Pizza Hut", "brand_wikidata": "Q191615"}
+    requires_proxy = "US"  # Akamai blocking is in use
 
     def start_requests(self):
         yield JsonRequest(
@@ -21,7 +22,6 @@ class PizzaHutNZSpider(Spider):
                 continue
 
             item = DictParser.parse(location)
-            item["website"] = "https://www.pizzahut.co.nz/"
 
             apply_yes_no("sells:alcohol", item, location["alcohol_drinks_available"])
             apply_yes_no(PaymentMethods.CASH, item, location["payment_accepted"]["cash"]["active"])

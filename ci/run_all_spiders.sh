@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -x
 echo "git revision: ${GIT_COMMIT}"
 
 if [ -z "${S3_BUCKET}" ]; then
@@ -34,13 +33,42 @@ mkdir -p "${SPIDER_RUN_DIR}"
 (>&2 echo "Write out a file with scrapy commands to parallelize")
 for spider in $(scrapy list -s REQUESTS_CACHE_ENABLED=False)
 do
-    echo "timeout -k 15s 8h scrapy crawl --output ${SPIDER_RUN_DIR}/output/${spider}.geojson:geojson --logfile ${SPIDER_RUN_DIR}/logs/${spider}.txt --loglevel ERROR --set TELNETCONSOLE_ENABLED=0 --set CLOSESPIDER_TIMEOUT=${SPIDER_TIMEOUT} --set LOGSTATS_FILE=${SPIDER_RUN_DIR}/stats/${spider}.json ${spider}" >> ${SPIDER_RUN_DIR}/commands.txt
+    echo "timeout -k 15s 8h scrapy crawl --output ${SPIDER_RUN_DIR}/output/${spider}.geojson:geojson --output ${SPIDER_RUN_DIR}/output/${spider}.parquet:parquet --logfile ${SPIDER_RUN_DIR}/logs/${spider}.txt --loglevel ERROR --set TELNETCONSOLE_ENABLED=0 --set CLOSESPIDER_TIMEOUT=${SPIDER_TIMEOUT} --set LOGSTATS_FILE=${SPIDER_RUN_DIR}/stats/${spider}.json ${spider}" >> ${SPIDER_RUN_DIR}/commands.txt
 done
 
 mkdir -p "${SPIDER_RUN_DIR}/logs"
 mkdir -p "${SPIDER_RUN_DIR}/stats"
 mkdir -p "${SPIDER_RUN_DIR}/output"
 SPIDER_COUNT=$(wc -l < "${SPIDER_RUN_DIR}/commands.txt" | tr -d ' ')
+
+# Send a message to Slack that we're starting
+if [ -z "${SLACK_WEBHOOK_URL}" ]; then
+    (>&2 echo "Skipping Slack notification because SLACK_WEBHOOK_URL environment variable not set")
+else
+    curl -X POST \
+         --silent \
+         -H 'Content-type: application/json' \
+         --data "{\"text\": \"Starting run ${RUN_TIMESTAMP} with ${SPIDER_COUNT} spiders\"}" \
+         "${SLACK_WEBHOOK_URL}"
+
+    # Set a hook to send a message to Slack when the job completes, including the exit code
+    trap '{
+        retval=$?
+        if [ $retval -eq 0 ]; then
+            curl -X POST \
+                 --silent \
+                 -H "Content-type: application/json" \
+                 --data "{\"text\": \"Run ${RUN_TIMESTAMP} completed successfully with ${SPIDER_COUNT} spiders\"}" \
+                 "${SLACK_WEBHOOK_URL}"
+        else
+            curl -X POST \
+                 --silent \
+                 -H "Content-type: application/json" \
+                 --data "{\"text\": \"Run ${RUN_TIMESTAMP} failed with exit code ${retval} with ${SPIDER_COUNT} spiders\"}" \
+                 "${SLACK_WEBHOOK_URL}"
+        fi
+    }' EXIT
+fi
 
 (>&2 echo "Running ${SPIDER_COUNT} spiders ${PARALLELISM} at a time")
 xargs -t -L 1 -P "${PARALLELISM}" -a "${SPIDER_RUN_DIR}/commands.txt" -i sh -c "{} || true"
@@ -74,12 +102,24 @@ if [ ! $retval -eq 0 ]; then
 fi
 (>&2 echo "Done generating pmtiles")
 
+python ci/concatenate_parquet.py \
+    --output "${SPIDER_RUN_DIR}/output.parquet" \
+    "${SPIDER_RUN_DIR}"/output/*.parquet
+retval=$?
+if [ ! $retval -eq 0 ]; then
+    (>&2 echo "Couldn't convert to parquet")
+fi
+
+# concatenate_parquet.py leaves behind the parquet files for each spider, and I don't
+# want to include those in the output zip, so delete them here.
+rm "${SPIDER_RUN_DIR}"/output/*.parquet
+
+(>&2 echo "Done concatenating parquet files")
+
 (>&2 echo "Writing out summary JSON")
 echo "{\"count\": ${SPIDER_COUNT}, \"results\": []}" >> "${SPIDER_RUN_DIR}/stats/_results.json"
 for spider in $(scrapy list)
 do
-    spider_out_geojson="${SPIDER_RUN_DIR}/output/${spider}.geojson"
-    spider_out_log="${SPIDER_RUN_DIR}/logs/${spider}.txt"
     statistics_json="${SPIDER_RUN_DIR}/stats/${spider}.json"
 
     feature_count=$(jq --raw-output '.item_scraped_count' "${statistics_json}")
@@ -176,6 +216,7 @@ jq -n --compact-output \
     --arg run_id "${RUN_TIMESTAMP}" \
     --arg run_output_url "${RUN_URL_PREFIX}/output.zip" \
     --arg run_pmtiles_url "${RUN_URL_PREFIX}/output.pmtiles" \
+    --arg run_parquet_url "${RUN_URL_PREFIX}/output.parquet" \
     --arg run_stats_url "${RUN_URL_PREFIX}/stats/_results.json" \
     --arg run_insights_url "${RUN_URL_PREFIX}/stats/_insights.json" \
     --arg run_start_time "${RUN_START}" \
@@ -183,7 +224,7 @@ jq -n --compact-output \
     --arg run_output_size "${OUTPUT_FILESIZE}" \
     --arg run_spider_count "${SPIDER_COUNT}" \
     --arg run_line_count "${OUTPUT_LINECOUNT}" \
-    '{"run_id": $run_id, "output_url": $run_output_url, "pmtiles_url": $run_pmtiles_url, "stats_url": $run_stats_url, "insights_url": $run_insights_url, "start_time": $run_start_time, "end_time": $run_end_time, "size_bytes": $run_output_size | tonumber, "spiders": $run_spider_count | tonumber, "total_lines": $run_line_count | tonumber }' \
+    '{"run_id": $run_id, "output_url": $run_output_url, "pmtiles_url": $run_pmtiles_url, "parquet_url": $run_parquet_url, "stats_url": $run_stats_url, "insights_url": $run_insights_url, "start_time": $run_start_time, "end_time": $run_end_time, "size_bytes": $run_output_size | tonumber, "spiders": $run_spider_count | tonumber, "total_lines": $run_line_count | tonumber }' \
     > latest.json
 
 retval=$?
@@ -200,6 +241,21 @@ aws s3 cp \
 retval=$?
 if [ ! $retval -eq 0 ]; then
     (>&2 echo "Couldn't copy latest.json to S3")
+    exit 1
+fi
+
+AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
+AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
+aws s3 \
+    --endpoint-url="${R2_ENDPOINT_URL}" \
+    cp \
+    --only-show-errors \
+    latest.json \
+    "s3://${R2_BUCKET}/runs/latest.json"
+
+retval=$?
+if [ ! $retval -eq 0 ]; then
+    (>&2 echo "Couldn't copy latest.json to R2")
     exit 1
 fi
 
@@ -247,12 +303,83 @@ if [ ! $retval -eq 0 ]; then
     exit 1
 fi
 
+AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
+AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
+aws s3 \
+    --endpoint-url="${R2_ENDPOINT_URL}" \
+    cp \
+    --only-show-errors \
+    history.json \
+    "s3://${R2_BUCKET}/runs/history.json"
+
+retval=$?
+if [ ! $retval -eq 0 ]; then
+    (>&2 echo "Couldn't copy history.json to R2")
+    exit 1
+fi
+
+# Update the latest/ directory with redirects to the latest run
+touch "${SPIDER_RUN_DIR}/latest_placeholder.txt"
+
+aws s3 cp \
+    --only-show-errors \
+    --website-redirect="https://data.alltheplaces.xyz/${RUN_S3_KEY_PREFIX}/output.zip" \
+    "${SPIDER_RUN_DIR}/latest_placeholder.txt" \
+    "s3://${S3_BUCKET}/runs/latest/output.zip"
+
+retval=$?
+if [ ! $retval -eq 0 ]; then
+    (>&2 echo "Couldn't update latest/output.zip redirect")
+    exit 1
+fi
+
+aws s3 cp \
+    --only-show-errors \
+    --website-redirect="https://data.alltheplaces.xyz/${RUN_S3_KEY_PREFIX}/output.pmtiles" \
+    "${SPIDER_RUN_DIR}/latest_placeholder.txt" \
+    "s3://${S3_BUCKET}/runs/latest/output.pmtiles"
+
+retval=$?
+if [ ! $retval -eq 0 ]; then
+    (>&2 echo "Couldn't update latest/output.pmtiles redirect")
+    exit 1
+fi
+
+aws s3 cp \
+    --only-show-errors \
+    --website-redirect="https://data.alltheplaces.xyz/${RUN_S3_KEY_PREFIX}/output.parquet" \
+    "${SPIDER_RUN_DIR}/latest_placeholder.txt" \
+    "s3://${S3_BUCKET}/runs/latest/output.parquet"
+
+retval=$?
+if [ ! $retval -eq 0 ]; then
+    (>&2 echo "Couldn't update latest/output.parquet redirect")
+    exit 1
+fi
+
+for spider in $(scrapy list)
+do
+    aws s3 cp \
+        --only-show-errors \
+        --website-redirect="https://data.alltheplaces.xyz/${RUN_S3_KEY_PREFIX}/output/${spider}.geojson" \
+        "${SPIDER_RUN_DIR}/latest_placeholder.txt" \
+        "s3://${S3_BUCKET}/runs/latest/output/${spider}.geojson"
+
+    retval=$?
+    if [ ! $retval -eq 0 ]; then
+        (>&2 echo "Couldn't update latest/output/${spider}.geojson redirect")
+        exit 1
+    fi
+done
+
+(>&2 echo "Done updating latest/ redirects")
+
 if [ -z "${BUNNY_API_KEY}" ]; then
     (>&2 echo "Skipping CDN cache purge because BUNNY_API_KEY environment variable not set")
 else
     curl --request GET \
          --silent \
-         --url 'https://api.bunny.net/purge?url=https%3A%2F%2Fdata.alltheplaces.xyz%2Fruns%2Flatest.json&async=false' \
+         --url 'https://api.bunny.net/purge?url=https%3A%2F%2Falltheplaces.b-cdn.net%2Fruns%2Flatest.json&async=false' \
          --header "AccessKey: ${BUNNY_API_KEY}" \
          --header 'accept: application/json'
 
@@ -266,7 +393,7 @@ else
 
     curl --request GET \
          --silent \
-         --url 'https://api.bunny.net/purge?url=https%3A%2F%2Fdata.alltheplaces.xyz%2Fruns%2Fhistory.json&async=false' \
+         --url 'https://api.bunny.net/purge?url=https%3A%2F%2Falltheplaces.b-cdn.net%2Fruns%2Fhistory.json&async=false' \
          --header "AccessKey: ${BUNNY_API_KEY}" \
          --header 'accept: application/json'
 
@@ -277,4 +404,18 @@ else
     fi
 
     (>&2 echo "Purged history.json from CDN")
+
+    curl --request GET \
+         --silent \
+         --url 'https://api.bunny.net/purge?url=https%3A%2F%2Falltheplaces.b-cdn.net%2Fruns%2Flatest%2Foutput%2F%2A&async=false' \
+         --header "AccessKey: ${BUNNY_API_KEY}" \
+         --header 'accept: application/json'
+
+    retval=$?
+    if [ ! $retval -eq 0 ]; then
+        (>&2 echo "Failed to purge latest/output/* from CDN")
+        exit 1
+    fi
+
+    (>&2 echo "Purged latest/output/* from CDN")
 fi
