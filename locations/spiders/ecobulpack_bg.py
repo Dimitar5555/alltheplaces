@@ -2,13 +2,13 @@ import io
 import logging
 
 import pdfplumber
-
 from scrapy import Spider
 
 from locations.items import Feature
 
 # Disable pdfplumber logging to avoid cluttering the output
 logging.getLogger("pdfminer").setLevel(logging.WARNING)
+
 
 class EcobulpackBGSpider(Spider):
     name = "ecobulpack_bg"
