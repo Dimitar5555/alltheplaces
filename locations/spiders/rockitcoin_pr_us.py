@@ -11,7 +11,6 @@ from locations.spiders.ampm_us import AmpmUSSpider
 from locations.spiders.bp import BpSpider
 from locations.spiders.chevron_us import BRANDS as CHEVRON_BRANDS
 from locations.spiders.circle_k import CircleKSpider
-from locations.spiders.citgo import CitgoSpider
 from locations.spiders.cvs_us import PHARMACY_BRANDS as CVS_BRANDS
 from locations.spiders.eg_america_us import EgAmericaUSSpider
 from locations.spiders.exxon_mobil import ExxonMobilSpider
@@ -32,7 +31,10 @@ class RockitcoinPRUSSpider(JSONBlobSpider):
         "https://us-central1-rockitcoin-data-development.cloudfunctions.net/rockitcoin-getLocationsHttps?latitude=34.0521&longitude=-118.2436&show2Way=false&showRcGo=true&radiusInM=1000000000000"
     ]
     locations_key = "locations"
-    custom_settings = {"DOWNLOAD_TIMEOUT": 60}
+    custom_settings = {
+        "DOWNLOAD_TIMEOUT": 60,
+        "DEFAULT_REQUEST_HEADERS": {"Referer": "https://rockitcoin.com/"},
+    }
 
     LOCATED_IN_MAPPINGS = [
         (["CVS"], CVS_BRANDS["CVS Pharmacy"]),
@@ -46,7 +48,7 @@ class RockitcoinPRUSSpider(JSONBlobSpider):
         (["TEXACO"], CHEVRON_BRANDS["Texaco"][0]),
         (["VALERO"], ValeroSpider.item_attributes),
         (["SUNOCO"], SunocoUSSpider.item_attributes),
-        (["CITGO"], CitgoSpider.item_attributes),
+        (["CITGO"], {"brand": "Citgo", "brand_wikidata": "Q2974437"}),
         (["76 GAS", "76"], Phillips66Conoco76Spider.BRANDS["76"]),
         (["CIRCLE K", "CIRCLEK"], CircleKSpider.CIRCLE_K),
         (["PHILLIPS 66"], Phillips66Conoco76Spider.BRANDS["P66"]),
@@ -79,7 +81,7 @@ class RockitcoinPRUSSpider(JSONBlobSpider):
         apply_category(Categories.ATM, item)
         item["extras"]["currency:USD"] = "yes"
         currencies_for_buying = [currency["code"] for currency in feature.get("crypto") if currency["buy"] == "1"]
-        currencies_for_selling = [currency["code"] for currency in feature.get("crypto") if currency["buy"] == "1"]
+        currencies_for_selling = [currency["code"] for currency in feature.get("crypto") if currency["sell"] == "1"]
         all_currencies = list(set(currencies_for_buying + currencies_for_selling))
         currencies_map = {
             "BCH": "BCH",

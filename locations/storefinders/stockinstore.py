@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 from typing import AsyncIterator, Iterable
 
 from scrapy import Spider
-from scrapy.http import FormRequest, TextResponse
+from scrapy.http import TextResponse
+from scrapy.http.request.form import FormRequest
 
 from locations.dict_parser import DictParser
 from locations.hours import OpeningHours
@@ -50,9 +53,8 @@ class StockInStoreSpider(Spider):
         }
         yield FormRequest(
             url="https://stockinstore.net/stores/getAllStores",
-            method="POST",
             headers={"Origin": self.api_origin},
-            formdata=data,  # ty: ignore[invalid-argument-type]
+            formdata=data,
         )
 
     def parse(self, response: TextResponse) -> Iterable[Feature]:

@@ -1,18 +1,21 @@
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from scrapy import Spider
-from scrapy.http import JsonRequest
+from scrapy.http import JsonRequest, Response
 
+from locations.categories import Categories, apply_category
 from locations.dict_parser import DictParser
 from locations.hours import DAYS, OpeningHours
+from locations.items import set_closed
 from locations.pipelines.address_clean_up import clean_address
+from locations.user_agents import BROWSER_DEFAULT
 
 
 class UrbnSpider(Spider):
     name = "urbn"
     allowed_domains = ["www.anthropologie.com"]
     start_urls = ["https://www.anthropologie.com/api/misl/v1/stores/search"]
-    custom_settings = {"ROBOTSTXT_OBEY": False}
+    custom_settings = {"ROBOTSTXT_OBEY": False, "USER_AGENT": BROWSER_DEFAULT}
 
     brands = {
         "ANTHROPOLOGIE": {
@@ -49,9 +52,9 @@ class UrbnSpider(Spider):
 
     async def start(self) -> AsyncIterator[JsonRequest]:
         for url in self.start_urls:
-            yield JsonRequest(url=url)
+            yield JsonRequest(url=url, headers={"Accept-Language": "en-US,en;q=0.9"})
 
-    def parse(self, response):
+    def parse(self, response: Response, **kwargs: Any) -> Any:
         for location in response.json()["results"]:
             if location.get("closed") is True:
                 continue
@@ -61,9 +64,12 @@ class UrbnSpider(Spider):
             else:
                 continue
             item["ref"] = str(location["number"])
-            item["name"] = location["addresses"]["marketing"].get("name")
-            if "COMING SOON" in item["name"].upper() or "CLOSED" in item["name"].upper().split():
-                continue
+            item["name"] = None
+            if (
+                "COMING SOON" in location["addresses"]["marketing"]["name"].upper()
+                or "CLOSED" in location["addresses"]["marketing"]["name"].upper().split()
+            ):
+                set_closed(item)
             item["street_address"] = clean_address(
                 [
                     location["addresses"]["marketing"].get("addressLineOne"),
@@ -92,4 +98,5 @@ class UrbnSpider(Spider):
                     hours_string + " " + DAYS[int(day_number) - 1] + ": " + day_hours["open"] + "-" + day_hours["close"]
                 )
             item["opening_hours"].add_ranges_from_string(hours_string)
+            apply_category(Categories.SHOP_CLOTHES, item)
             yield item

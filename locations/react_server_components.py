@@ -36,11 +36,13 @@ def parse_rsc(data_raw: Iterable[int]) -> Iterator[tuple[int, Any]]:
                 row_data = row_tag.encode() + row_data
                 row_tag = b"\0"
 
-        if array_type := ARRAY_TYPES.get(row_tag):  # ty: ignore[invalid-argument-type]
+        if array_type := ARRAY_TYPES.get(row_tag):
             yield row_id, array.array(array_type, row_data)
         else:
             row_str = row_data.decode()
 
+            if not row_str:
+                continue
             if row_tag == "H":
                 yield row_id, (row_str[0], json.loads(row_str[1:]))
             elif row_tag == "T":
